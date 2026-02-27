@@ -1,21 +1,17 @@
 import pandas as pd
 
+# 1. VERİYİ YÜKLE
+# Not: Dosya yolunun doğruluğundan emin ol.
 df = pd.read_csv(
-    "data/Kitap1.csv",
+    "data/pubchem_brd4_bioactivity_protein.csv",
     sep=",",   
     engine="python",    #c parser yerine python parser kullanmayı seçtik. (python parser, c parser'a göre daha toleranslı ama yavaş.)
     on_bad_lines="skip", #bozuk bir satır görünce hata vermek yerine satır atlar
     encoding="utf-8" #Türkçe + özel karakterler için 
 )
 
-"""
-pd.set_option("display.max_columns", None)
-pd.set_option("display.width", None)
-print(df)
-print(df.shape)
-"""
-
-# 2. Sadece senin istediğin 5 sütunu seçelim
+# 2. GEREKLİ SÜTUNLARI SEÇ VE TEMEL TEMİZLİK
+# Proje için kritik olan sütunları filtreliyoruz [cite: 14, 26]
 selected_columns = [
     'Activity',
     'Activity_Type', 
@@ -25,27 +21,56 @@ selected_columns = [
     'Protein_Accession'
 ]
 
-# Yeni bir DataFrame oluştur
-egitim_df = df[selected_columns]
+# Sadece ihtiyacımız olan sütunları al ve sayısal değeri/CID'si olmayanları sil
+valid_metrics = ['IC50', 'Ki', 'Kd']
+df_filtered = df[df['Activity_Type'].isin(valid_metrics)][selected_columns].copy()
+df_filtered = df_filtered.dropna(subset=['Activity_Value', 'Compound_CID'])
 
-# --- ANALİZ VE GÖSTERİM ---
+# 3. ETİKETLEME FONKSİYONU (THRESHOLDING)
+# Belirlediğin bilimsel kriterlere göre aktif/inaktif sınıflandırması yapar [cite: 17, 30]
+# Değerlerin mikromolar olduğu varsayıldı.
+def assign_label(row):
+    m_type = row['Activity_Type']
+    val = row['Activity_Value']
+    
+    # IC50 kriteri: < 1 uM Aktif, > 10 uM İnaktif
+    if m_type == 'IC50':
+        if val < 1.0: return 1
+        if val > 10.0: return 0
+    
+    # Kd kriteri: < 500 nM (0.5 uM) Aktif, > 10 uM İnaktif
+    elif m_type == 'Kd':
+        if val < 0.5: return 1
+        if val > 10.0: return 0
+    
+    # Ki kriteri: < 300 nM (0.3 uM) Aktif, > 10 uM İnaktif
+    elif m_type == 'Ki':
+        if val < 0.3: return 1
+        if val > 10.0: return 0
+    
+    return None # Gri bölgede kalanlar
 
-# 3. Önce ilk 100 satırı filtrele, sonra içinden rastgele 10 tanesini seç
-# .iloc[:100] -> ilk 100 satırı alır
-# .sample(10) -> içinden rastgele 10 tanesini çeker
-random_sample = df[selected_columns].iloc[:100].sample(10)
-print("--- İlk 100 Satır İçinden Rastgele Seçilen 10 Örnek ---")
-print(random_sample)
+# Fonksiyonu uygula ve yeni Label sütununu oluştur. Yani etiketlemeyi uyguluyoruz
+df_filtered['Label'] = df_filtered.apply(assign_label, axis=1)
 
-# Veri seti hakkında kısa özet (Kaç satır dolu, veri tipleri ne?)
-print("\n--- Veri Seti Özeti ---")
-print(egitim_df.info())
+# 5. Gri bölgeyi (None olanları) temizle ve duplikaları (mükerrer CID) sil
+# Aynı bileşik hem aktif hem inaktif görünüyorsa en aktif olanı (1) tutarız
+final_df = df_filtered.dropna(subset=['Label']).sort_values(by='Label', ascending=False)
+final_df = final_df.drop_duplicates(subset=['Compound_CID'])
 
-# Kaç tane boş (NaN) değer olduğunu göster
-print("\n--- Eksik Değer Sayısı ---")
-print(egitim_df.isnull().sum())
+# Sonuçları ekrana yazdır
+print("--- İşlem Tamamlandı ---")
+print(f"Toplam Aktif (1) Sayısı: {len(final_df[final_df['Label'] == 1])}")
+print(f"Toplam İnaktif (0) Sayısı: {len(final_df[final_df['Label'] == 0])}")
 
-# Activity_Type dağılımını göster (Kaç IC50, kaç Tm var?)
-print("\n--- Aktivite Türü Dağılımı ---")
-print(egitim_df['Activity_Type'].value_counts())
+# Sonuçları kontrol et
+print("--- TÜM VERİ SETİ SONUÇLARI ---")
+print(final_df['Label'].value_counts())
+print(f"Toplam benzersiz ve etiketli bileşik sayısı: {len(final_df)}")
+
+# Temizlenmiş veriyi yeni bir CSV olarak kaydet
+final_df.to_csv('brd4_egitim_verisi.csv', index=False)
+
+
+
 
