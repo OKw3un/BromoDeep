@@ -1,62 +1,94 @@
 import pandas as pd
+from pathlib import Path  # Modern ve temiz yol kontrolü için
+import os
 
-# 1. VERİYİ YÜKLE
-# Not: Dosya yolunun doğruluğundan emin ol.
-df = pd.read_csv(
-    "data/pubchem_brd4_bioactivity_protein.csv",
-    sep=",",   
-    engine="python",    #c parser yerine python parser kullanmayı seçtik. (python parser, c parser'a göre daha toleranslı ama yavaş.)
-    on_bad_lines="skip", #bozuk bir satır görünce hata vermek yerine satır atlar
-    encoding="utf-8" #Türkçe + özel karakterler için 
-)
+# ÇALIŞMA DİZİNİ KONTROLÜ (if-else bloğuna kadar olan 1-2-3 maddeleri için): 
+# Path(__file__) kullanarak dosya yollarını çalıştırılan terminal dizinine göre değil, 
+# kodun bilgisayardaki fiziksel konumuna göre belirliyoruz. 
+# Böylece "cd project" yapsak bile data klasörü her zaman doğru bulunur.
 
-# 2. GEREKLİ SÜTUNLARI SEÇ VE TEMEL TEMİZLİK
-# Proje için kritik olan sütunları filtreliyoruz [cite: 14, 26]
-selected_columns = [
-    'Activity',
-    'Activity_Type', 
-    'Activity_Qualifier', 
-    'Activity_Value', 
-    'Compound_CID', 
-    'Protein_Accession'
-]
+# 1. KODUN OLDUĞU KLASÖRÜ BUL (Örn: .../bromodomain/project)
+SCRIPT_DIR = Path(__file__).resolve().parent
 
-# Sadece ihtiyacımız olan sütunları al ve sayısal değeri/CID'si olmayanları sil
-valid_metrics = ['IC50', 'Ki', 'Kd']
-df_filtered = df[df['Activity_Type'].isin(valid_metrics)][selected_columns].copy()
-df_filtered = df_filtered.dropna(subset=['Activity_Value', 'Compound_CID'])
+# 2. BİR ÜST KLASÖRE ÇIK (Örn: .../bromodomain)
+# Eğer data klasörü project'in içinde değil, yanındaysa .parent kullanmalıyız
+BASE_DIR = SCRIPT_DIR.parent
 
-# 3. ETİKETLEME FONKSİYONU (THRESHOLDING)
-# Belirlediğin bilimsel kriterlere göre aktif/inaktif sınıflandırması yapar [cite: 17, 30]
-# Değerlerin mikromolar olduğu varsayıldı.
-def assign_label(row):
-    m_type = row['Activity_Type']
-    val = row['Activity_Value']
-    
-    # IC50 kriteri: < 1 uM Aktif, > 10 uM İnaktif
-    if m_type == 'IC50':
-        if val < 1.0: return 1
-        if val > 10.0: return 0
-    
-    # Kd kriteri: < 500 nM (0.5 uM) Aktif, > 10 uM İnaktif
-    elif m_type == 'Kd':
-        if val < 0.5: return 1
-        if val > 10.0: return 0
-    
-    # Ki kriteri: < 300 nM (0.3 uM) Aktif, > 10 uM İnaktif
-    elif m_type == 'Ki':
-        if val < 0.3: return 1
-        if val > 10.0: return 0
-    
-    return None # Gri bölgede kalanlar
+# 3. YOLLARI BU ANA DİZİNE GÖRE AYARLA
+# Bu sayede terminalde hangi klasörde olursan ol hata almazsın.
+input_file = BASE_DIR / "data" / "pubchem_brd4_bioactivity_protein.csv"
+output_file = BASE_DIR / "data" / "brd4_egitim_verisi.csv"
 
-# Fonksiyonu uygula ve yeni Label sütununu oluştur. Yani etiketlemeyi uyguluyoruz
-df_filtered['Label'] = df_filtered.apply(assign_label, axis=1)
+# Eğer dosya zaten varsa, işlemleri atla ve mevcut dosyayı yükle
+if output_file.exists():
+    print(f"--- '{output_file.name}' zaten mevcut. İşlemler atlanıyor. ---")
+    final_df = pd.read_csv(output_file)
+else:
+    print(f"--- '{input_file.name}' bulunamadı. Veri işleme başlatılıyor... ---")
 
-# 5. Gri bölgeyi (None olanları) temizle ve duplikaları (mükerrer CID) sil
-# Aynı bileşik hem aktif hem inaktif görünüyorsa en aktif olanı (1) tutarız
-final_df = df_filtered.dropna(subset=['Label']).sort_values(by='Label', ascending=False)
-final_df = final_df.drop_duplicates(subset=['Compound_CID'])
+    # 1. VERİYİ YÜKLE
+    # Not: Dosya yolunun doğruluğundan emin ol.
+    df = pd.read_csv(
+        input_file,
+        sep=",",   
+        engine="python",    #c parser yerine python parser kullanmayı seçtik. (python parser, c parser'a göre daha toleranslı ama yavaş.)
+        on_bad_lines="skip", #bozuk bir satır görünce hata vermek yerine satır atlar
+        encoding="utf-8" #Türkçe + özel karakterler için 
+    )
+
+    # 2. GEREKLİ SÜTUNLARI SEÇ VE TEMEL TEMİZLİK
+    # Proje için kritik olan sütunları filtreliyoruz [cite: 14, 26]
+    selected_columns = [
+        'Activity',
+        'Activity_Type', 
+        'Activity_Qualifier', 
+        'Activity_Value', 
+        'Compound_CID', 
+        'Protein_Accession'
+    ]
+
+    # Sadece ihtiyacımız olan sütunları al ve sayısal değeri/CID'si olmayanları sil
+    valid_metrics = ['IC50', 'Ki', 'Kd']
+    df_filtered = df[df['Activity_Type'].isin(valid_metrics)][selected_columns].copy()
+    df_filtered = df_filtered.dropna(subset=['Activity_Value', 'Compound_CID'])
+
+    # 3. ETİKETLEME FONKSİYONU (THRESHOLDING)
+    # Belirlediğin bilimsel kriterlere göre aktif/inaktif sınıflandırması yapar [cite: 17, 30]
+    # Değerlerin mikromolar olduğu varsayıldı.
+    def assign_label(row):
+        m_type = row['Activity_Type']
+        val = row['Activity_Value']
+        
+        # IC50 kriteri: < 1 uM Aktif, > 10 uM İnaktif
+        if m_type == 'IC50':
+            if val < 1.0: return 1
+            if val > 10.0: return 0
+        
+        # Kd kriteri: < 500 nM (0.5 uM) Aktif, > 10 uM İnaktif
+        elif m_type == 'Kd':
+            if val < 0.5: return 1
+            if val > 10.0: return 0
+        
+        # Ki kriteri: < 300 nM (0.3 uM) Aktif, > 10 uM İnaktif
+        elif m_type == 'Ki':
+            if val < 0.3: return 1
+            if val > 10.0: return 0
+        
+        return None # Gri bölgede kalanlar
+
+    # Fonksiyonu uygula ve yeni Label sütununu oluştur. Yani etiketlemeyi uyguluyoruz
+    df_filtered['Label'] = df_filtered.apply(assign_label, axis=1)
+
+    # 5. Gri bölgeyi (None olanları) temizle ve duplikaları (mükerrer CID) sil
+    # Aynı bileşik hem aktif hem inaktif görünüyorsa en aktif olanı (1) tutarız
+    final_df = df_filtered.dropna(subset=['Label']).sort_values(by='Label', ascending=False)
+    final_df = final_df.drop_duplicates(subset=['Compound_CID'])
+
+    # Kaydet
+    # Kaydederken tam yolu kullan
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    final_df.to_csv(output_file, index=False)
+    print("--- İşlem başarıyla tamamlandı ---")
 
 # Sonuçları ekrana yazdır
 print("--- İşlem Tamamlandı ---")
