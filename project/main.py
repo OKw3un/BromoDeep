@@ -1,6 +1,6 @@
 import pandas as pd
 from pathlib import Path  # Modern ve temiz yol kontrolü için
-import os
+import numpy as np
 
 # ÇALIŞMA DİZİNİ KONTROLÜ (if-else bloğuna kadar olan 1-2-3 maddeleri için): 
 # Path(__file__) kullanarak dosya yollarını çalıştırılan terminal dizinine göre değil, 
@@ -40,69 +40,53 @@ else:
     # Proje için kritik olan sütunları filtreliyoruz [cite: 14, 26]
     selected_columns = [
         'Activity',
-        'Activity_Type', 
-        'Activity_Qualifier', 
+        'Activity_Type',  
         'Activity_Value', 
         'Compound_CID', 
-        'Protein_Accession'
     ]
 
     # Sadece ihtiyacımız olan sütunları al ve sayısal değeri/CID'si olmayanları sil
-    valid_metrics = ['IC50', 'Ki', 'Kd']
-    df_filtered = df[df['Activity_Type'].isin(valid_metrics)][selected_columns].copy()
-    df_filtered = df_filtered.dropna(subset=['Activity_Value', 'Compound_CID'])
+    df_filtered = df[selected_columns].copy()
+    # sadece IC50/Ki/Kd olanlar + Unspecified kalır
+    df_filtered = df_filtered[
+        df_filtered["Activity_Type"].isin(["IC50", "Ki", "Kd", "Unspecified"])
+    ]
+    # Activity_Value null ise sadece Unspecified ise sil
+    df_filtered = df_filtered[
+        ~(
+            df_filtered["Activity_Value"].isna() &
+            (df_filtered["Activity_Type"] == "Unspecified")
+        )
+    ]
 
-    # 3. ETİKETLEME FONKSİYONU (THRESHOLDING)
-    # Belirlediğin bilimsel kriterlere göre aktif/inaktif sınıflandırması yapar [cite: 17, 30]
-    # Değerlerin mikromolar olduğu varsayıldı.
-    def assign_label(row):
-        m_type = row['Activity_Type']
-        val = row['Activity_Value']
-        
-        # IC50 kriteri: < 1 uM Aktif, > 10 uM İnaktif
-        if m_type == 'IC50':
-            if val < 1.0: return 1
-            if val > 10.0: return 0
-        
-        # Kd kriteri: < 500 nM (0.5 uM) Aktif, > 10 uM İnaktif
-        elif m_type == 'Kd':
-            if val < 0.5: return 1
-            if val > 10.0: return 0
-        
-        # Ki kriteri: < 300 nM (0.3 uM) Aktif, > 10 uM İnaktif
-        elif m_type == 'Ki':
-            if val < 0.3: return 1
-            if val > 10.0: return 0
-        
-        return None # Gri bölgede kalanlar
+    # 3. µM normalize (eğer veri zaten µM ise direkt kullan)
+    df_filtered["uM"] = df_filtered["Activity_Value"]
 
-    # Fonksiyonu uygula ve yeni Label sütununu oluştur. Yani etiketlemeyi uyguluyoruz
-    df_filtered['Label'] = df_filtered.apply(assign_label, axis=1)
+    # 4. p-value dönüşümü
+    df_filtered["p_value"] = 6 - np.log10(df_filtered["Activity_Value"])
 
-    # 5. Gri bölgeyi (None olanları) temizle ve duplikaları (mükerrer CID) sil
-    # Aynı bileşik hem aktif hem inaktif görünüyorsa en aktif olanı (1) tutarız
-    final_df = df_filtered.dropna(subset=['Label']).sort_values(by='Label', ascending=False)
-    final_df = final_df.drop_duplicates(subset=['Compound_CID'])
+    # 5. Label (1 µM threshold)
+    df_filtered["Label"] = (df_filtered["uM"] <= 1.0).astype(int)
+    df_filtered["Final_Activity"] = df_filtered["Activity"]
+    mask = df_filtered["Activity"] == "Unspecified"
+    df_filtered.loc[mask, "Final_Activity"] = np.where(
+        df_filtered.loc[mask, "uM"] <= 1.0,
+        "Active",
+        "Inactive"
+    )
 
-    # Kaydet
+    # duplicate cleanup + gereksiz sütunları kaldır
+    final_df = (
+    df_filtered
+    .sort_values(by='p_value', ascending=False)
+    .drop_duplicates(subset=['Compound_CID'])
+    .drop(columns=["Label", "uM"])
+    )
+
     # Kaydederken tam yolu kullan
     output_file.parent.mkdir(parents=True, exist_ok=True)
     final_df.to_csv(output_file, index=False)
     print("--- İşlem başarıyla tamamlandı ---")
 
-# Sonuçları ekrana yazdır
-print("--- İşlem Tamamlandı ---")
-print(f"Toplam Aktif (1) Sayısı: {len(final_df[final_df['Label'] == 1])}")
-print(f"Toplam İnaktif (0) Sayısı: {len(final_df[final_df['Label'] == 0])}")
-
-# Sonuçları kontrol et
-print("--- TÜM VERİ SETİ SONUÇLARI ---")
-print(final_df['Label'].value_counts())
-print(f"Toplam benzersiz ve etiketli bileşik sayısı: {len(final_df)}")
-
-# Temizlenmiş veriyi yeni bir CSV olarak kaydet
-final_df.to_csv('brd4_egitim_verisi.csv', index=False)
-
-
-
+print("İşlem tamamlandı.")
 
