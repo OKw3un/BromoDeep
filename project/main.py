@@ -1,92 +1,134 @@
 import pandas as pd
-from pathlib import Path  # Modern ve temiz yol kontrolü için
+from pathlib import Path
 import numpy as np
 
-# ÇALIŞMA DİZİNİ KONTROLÜ (if-else bloğuna kadar olan 1-2-3 maddeleri için): 
-# Path(__file__) kullanarak dosya yollarını çalıştırılan terminal dizinine göre değil, 
-# kodun bilgisayardaki fiziksel konumuna göre belirliyoruz. 
-# Böylece "cd project" yapsak bile data klasörü her zaman doğru bulunur.
+# =========================================================
+# 📌 PATH SETUP
+# Purpose: Ensure correct access to the data directory
+# regardless of where the script is executed
+# =========================================================
 
-# 1. KODUN OLDUĞU KLASÖRÜ BUL (Örn: .../bromodomain/project)
 SCRIPT_DIR = Path(__file__).resolve().parent
-
-# 2. BİR ÜST KLASÖRE ÇIK (Örn: .../bromodomain)
-# Eğer data klasörü project'in içinde değil, yanındaysa .parent kullanmalıyız
 BASE_DIR = SCRIPT_DIR.parent
 
-# 3. YOLLARI BU ANA DİZİNE GÖRE AYARLA
-# Bu sayede terminalde hangi klasörde olursan ol hata almazsın.
 input_file = BASE_DIR / "data" / "pubchem_brd4_bioactivity_protein.csv"
-output_file = BASE_DIR / "data" / "brd4_egitim_verisi.csv"
+output_file = BASE_DIR / "data" / "brd4_full_dataset.csv"
 
-# Eğer dosya zaten varsa, işlemleri atla ve mevcut dosyayı yükle
+# =========================================================
+# 📌 CACHE CHECK
+# If processed data already exists, skip reprocessing
+# and load the existing dataset to save time
+# =========================================================
+
 if output_file.exists():
-    print(f"--- '{output_file.name}' zaten mevcut. İşlemler atlanıyor. ---")
+    print(f"--- {output_file.name} already exists. Loading cached data ---")
     final_df = pd.read_csv(output_file)
-else:
-    print(f"--- '{input_file.name}' bulunamadı. Veri işleme başlatılıyor... ---")
 
-    # 1. VERİYİ YÜKLE
-    # Not: Dosya yolunun doğruluğundan emin ol.
+else:
+    print(f"--- Processing raw dataset: {input_file.name} ---")
+
+    # =========================================================
+    # 📌 LOAD RAW DATA
+    # PubChem bioactivity dataset
+    # =========================================================
+
     df = pd.read_csv(
         input_file,
-        sep=",",   
-        engine="python",    #c parser yerine python parser kullanmayı seçtik. (python parser, c parser'a göre daha toleranslı ama yavaş.)
-        on_bad_lines="skip", #bozuk bir satır görünce hata vermek yerine satır atlar
-        encoding="utf-8" #Türkçe + özel karakterler için 
+        sep=",",
+        engine="python",
+        on_bad_lines="skip",
+        encoding="utf-8"
     )
 
-    # 2. GEREKLİ SÜTUNLARI SEÇ VE TEMEL TEMİZLİK
-    # Proje için kritik olan sütunları filtreliyoruz [cite: 14, 26]
+    # =========================================================
+    # 📌 COLUMN SELECTION
+    # Only keep relevant bioactivity fields
+    # =========================================================
+
     selected_columns = [
-        'Activity',
-        'Activity_Type',  
-        'Activity_Value', 
-        'Compound_CID', 
+        "Activity",
+        "Activity_Type",
+        "Activity_Value",
+        "Compound_CID"
     ]
 
-    # Sadece ihtiyacımız olan sütunları al ve sayısal değeri/CID'si olmayanları sil
     df_filtered = df[selected_columns].copy()
-    # sadece IC50/Ki/Kd olanlar + Unspecified kalır
+
+    # =========================================================
+    # 📌 FILTER VALID ASSAY TYPES
+    # Keep only standardized activity measurements
+    # =========================================================
+
     df_filtered = df_filtered[
         df_filtered["Activity_Type"].isin(["IC50", "Ki", "Kd", "Unspecified"])
     ]
-    # Activity_Value null ise sadece Unspecified ise sil
-    df_filtered = df_filtered[
-        ~(
-            df_filtered["Activity_Value"].isna() &
-            (df_filtered["Activity_Type"] == "Unspecified")
-        )
-    ]
 
-    # 3. µM normalize (eğer veri zaten µM ise direkt kullan)
+    # Remove missing activity values
+    df_filtered = df_filtered[df_filtered["Activity_Value"].notna()]
+
+    # =========================================================
+    # 📌 UNIT ASSUMPTION
+    # All values are assumed to be in µM
+    # =========================================================
+
     df_filtered["uM"] = df_filtered["Activity_Value"]
 
-    # 4. p-value dönüşümü
+    # =========================================================
+    # 📌 ACTIVITY NORMALIZATION (p-value)
+    # Log-scale transformation for model stability
+    # =========================================================
+
     df_filtered["p_value"] = 6 - np.log10(df_filtered["Activity_Value"])
 
-    # 5. Label (1 µM threshold)
+    # =========================================================
+    # 📌 BINARY LABELING
+    # Threshold: 1 µM
+    # Active: ≤ 1 µM
+    # Inactive: > 1 µM
+    # =========================================================
+
     df_filtered["Label"] = (df_filtered["uM"] <= 1.0).astype(int)
-    df_filtered["Final_Activity"] = df_filtered["Activity"]
+
+    # =========================================================
+    # 📌 UNSPECIFIED HANDLING
+    # Assign labels based on threshold
+    # =========================================================
+
     mask = df_filtered["Activity"] == "Unspecified"
+
     df_filtered.loc[mask, "Final_Activity"] = np.where(
         df_filtered.loc[mask, "uM"] <= 1.0,
         "Active",
         "Inactive"
     )
 
-    # duplicate cleanup + gereksiz sütunları kaldır
+    # =========================================================
+    # 📌 CLEANUP + DEDUPLICATION
+    # Keep most reliable measurement per compound
+    # =========================================================
+
     final_df = (
-    df_filtered
-    .sort_values(by='p_value', ascending=False)
-    .drop_duplicates(subset=['Compound_CID'])
-    .drop(columns=["Label", "uM"])
+        df_filtered
+        .sort_values(by="p_value", ascending=False)
+        .drop_duplicates(subset=["Compound_CID"])
     )
 
-    # Kaydederken tam yolu kullan
+    # =========================================================
+    # 📌 MODEL DATA PREPARATION (PLACEHOLDER)
+    # SELFIES will be generated in next pipeline step
+    # =========================================================
+
+    full_df = final_df.copy()
+    full_df["SELFIES"] = None  # to be generated from SMILES
+
+    model_df = full_df[["SELFIES", "Label"]].copy()
+
+    model_df.to_csv(BASE_DIR / "data" / "brd4_model_dataset.csv", index=False)
+
+    # Save full processed dataset
     output_file.parent.mkdir(parents=True, exist_ok=True)
     final_df.to_csv(output_file, index=False)
-    print("--- İşlem başarıyla tamamlandı ---")
 
-print("İşlem tamamlandı.")
+    print("--- Processing completed successfully ---")
 
+print("Done.")
